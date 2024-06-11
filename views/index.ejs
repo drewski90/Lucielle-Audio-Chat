@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title></title>
+    <!-- Vuetify CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/vuetify@2.5.8/dist/vuetify.min.css" rel="stylesheet">
+    <!-- Vue.js -->
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
+    <!-- Vuetify JS -->
+    <script src="https://cdn.jsdelivr.net/npm/vuetify@2.5.8/dist/vuetify.js"></script>
+</head>
+<body>
+    <div id="app">
+        <v-app>
+            <v-container>
+                <h1>Open AI Voice Chat</h1>
+                <v-btn @click="startRecording" :disabled="isRecording">Start Recording</v-btn>
+                <v-btn @click="stopRecording" :disabled="!isRecording">Stop Recording</v-btn>
+                <p>{{ status }}</p>
+                <pre>{{messages}}</pre>
+            </v-container>
+        </v-app>
+    </div>
+
+    <script>
+        new Vue({
+            el: '#app',
+            vuetify: new Vuetify(),
+            data: {
+                isRecording: false,
+                status: '',
+                mediaRecorder: null,
+                audioChunks: [],
+                messages: [],
+                audioPlayer: new Audio(),
+                isPlayingAudio: false
+            },
+            methods: {
+                async startRecording() {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        this.mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                        this.mediaRecorder.ondataavailable = event => {
+                            this.audioChunks.push(event.data);
+                        };
+                        this.mediaRecorder.onstop = this.handleStop;
+                        this.mediaRecorder.start();
+                        this.isRecording = true;
+                        this.status = 'Recording...';
+                    } catch (error) {
+                        console.error('Error accessing media devices.', error);
+                    }
+                },
+                stopRecording() {
+                    this.mediaRecorder.stop();
+                    this.isRecording = false;
+                },
+                async handleStop() {
+                    const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                    this.audioChunks = [];
+                    this.status = 'Uploading...';
+                    const data = await this.uploadAudio(audioBlob);
+                    this.messages = [
+                      ...this.messages,
+                      {'role': 'user', 'content': data.transcription},
+                      {'role': 'assistant', 'content': data.completion}
+                    ];
+                    await this.generateAudio(data.completion);
+                    this.status = 'Upload complete!';
+                },
+                async uploadAudio(audioBlob) {
+                    const formData = new FormData();
+                    formData.append('audio', audioBlob, 'recording.webm');
+                    formData.append('json', JSON.stringify({messages: this.messages}));
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        body: formData,
+                    });
+                    const result = await response.json();
+                    console.log(result);
+                    return result;
+                },
+                generateAudio(text) {
+                  return new Promise((resolve, reject) => {
+                    this.audioPlayer.src = '/audio_clip?text=' + text;
+                    this.audioPlayer.onplay = () => {
+                      this.isPlayingAudio = true;
+                    };
+                    this.audioPlayer.onpause = () => {
+                      this.isPlayingAudio = false;
+                      resolve();
+                    };
+                    this.audioPlayer.onended = () => {
+                      this.isPlayingAudio = false;
+                      resolve();
+                    };
+                    this.audioPlayer.onerror = (e) => {
+                      this.isPlayingAudio = false;
+                      reject(e);
+                    }
+                    this.audioPlayer.play();
+                  })
+                }
+            }
+        });
+    </script>
+</body>
+</html>
