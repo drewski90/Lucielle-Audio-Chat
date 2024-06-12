@@ -1,18 +1,20 @@
 const express = require('express');
 const axios = require('axios');
-const multer = require('multer');
 const path = require('path');
-const FormData = require('form-data');
 const bodyParser = require('body-parser');
+const http = require('http');
+const { Server } = require('socket.io');
+const speech = require('@google-cloud/speech');
 require('dotenv').config();
 
 const app = express();
-const upload = multer();
-
+const server = http.createServer(app);
+const io = new Server(server);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const RESEMBLE_PROJECT = process.env.RESEMBLE_PROJECT;
 const RESEMBLE_API_KEY = process.env.RESEMBLE_API_KEY;
 const RESEMBLE_VOICE_ID = process.env.RESEMBLE_VOICE_ID;
+const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
@@ -23,7 +25,7 @@ app.get('/', (req, res) => {
     res.render('index');
 });
 
-async function fetchAudioClip(text) {
+async function generateAudioClip(text) {
     const url = 'https://f.cluster.resemble.ai/stream';
     const headers = {
         'Authorization': `Bearer ${RESEMBLE_API_KEY}`
@@ -42,68 +44,92 @@ async function fetchAudioClip(text) {
 
 app.get('/audio_clip', async (req, res) => {
     const text = req.query.text;
-    const audioClipStream = await fetchAudioClip(text);
+    const audioClipStream = await generateAudioClip(text);
     res.set('Content-Type', 'audio/wav');
     audioClipStream.pipe(res);
 });
 
-app.post('/upload', upload.single('audio'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No audio file provided' });
+
+app.post('/chat_completion', async (req, res) => {
+    const jsonData = req.body;
+
+    if (!jsonData.messages || jsonData.messages.length ===0) {
+        return res.status(400).json({ error: 'No messages provided' });
     }
 
-    const audioFile = req.file.buffer;
-    const jsonData = req.json || {};
-    const result = await processAudio(audioFile, jsonData);
-    res.json(result);
-});
+    res.setHeader('Content-Type', 'text/plain');
 
-async function processAudio(audioFile, jsonData) {
-    const transcription = await transcribeAudio(audioFile);
-    const completion = await getOpenaiCompletion(transcription, jsonData);
-    return {
-        transcription,
-        completion
-    };
-}
-
-async function transcribeAudio(audioData) {
-    const url = 'https://api.openai.com/v1/audio/transcriptions';
-    const form = new FormData();
-    form.append('file', audioData, {
-        filename: 'recording.webm',
-        contentType: 'audio/webm'
-    });
-    form.append('model', 'whisper-1');
-    form.append('response_format', 'verbose_json');
-    form.append('timestamp_granularities', 'word');
-
-    const response = await axios.post(url, form, {
-        headers: {
-            ...form.getHeaders(),
-            'Authorization': `Bearer ${OPENAI_API_KEY}`
-        }
-    });
-    return response.data.text;
-}
-
-async function getOpenaiCompletion(prompt, jsonData) {
     const url = 'https://api.openai.com/v1/chat/completions';
+
     const headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${OPENAI_API_KEY}`
     };
     const data = {
         model: 'gpt-4-turbo',
-        messages: [...(jsonData.messages || []), { role: "user", content: prompt }],
-        max_tokens: 100
+        messages: jsonData.messages,
+        max_tokens: 100,
+        stream: true
     };
 
-    const response = await axios.post(url, data, { headers });
-    return response.data.choices[0].message.content;
-}
+    try {
+        const { data: stream } = await axios.post(url, data, { headers, responseType: 'stream' });
+        // Pipe the OpenAI response stream directly to the Express response
+        stream.pipe(res);
+    } catch (error) {
+        console.error('Error while streaming data from OpenAI:', error);
+        res.status(500).send('Failed to stream data from OpenAI');
+    }
+});
+
+// Google Cloud Speech-to-Text Client
+const client = new speech.SpeechClient({
+    keyFilename: GOOGLE_APPLICATION_CREDENTIALS,
+});
+
+const streams = {};
+
+io.on('connection', (socket) => {
+    console.log('a user connected: ' + socket.id);
+
+    const recognizeStream = client
+        .streamingRecognize({
+            config: {
+                encoding: 'WEBM_OPUS',
+                sampleRateHertz: 16000,
+                languageCode: 'en-US',
+            },
+            interimResults: true,
+        })
+        .on('error', (error) => {
+            socket.emit('transcriptionError', error.message);
+        })
+        .on('data', (response) => {
+            const transcription =
+                response.results[0] && response.results[0].alternatives[0]
+                    ? response.results[0].alternatives[0].transcript
+                    : 'Transcription not available';
+            socket.emit('transcription', transcription);
+        });
+
+    streams[socket.id] = recognizeStream;
+
+    socket.on('audioData', (data) => {
+        if (streams[socket.id]) {
+            streams[socket.id].write(data);
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('user disconnected: ' + socket.id);
+        if (streams[socket.id]) {
+            streams[socket.id].end();
+            delete streams[socket.id];
+        }
+    });
+});
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
+server.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });

@@ -10,15 +10,16 @@
     <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
     <!-- Vuetify JS -->
     <script src="https://cdn.jsdelivr.net/npm/vuetify@2.5.8/dist/vuetify.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
 </head>
 <body>
     <div id="app">
         <v-app>
             <v-container>
                 <h1>Open AI Voice Chat</h1>
-                <v-btn @click="startRecording" :disabled="isRecording">Start Recording</v-btn>
-                <v-btn @click="stopRecording" :disabled="!isRecording">Stop Recording</v-btn>
-                <p>{{ status }}</p>
+                <v-btn @click="startTranscription" :disabled="isTranscribing">Start Listening</v-btn>
+                <v-btn @click="stopTranscription" :disabled="!isTranscribing">Stop Listening</v-btn>
+                <p>{{transcript}}</p>
                 <pre>{{messages}}</pre>
             </v-container>
         </v-app>
@@ -29,33 +30,103 @@
             el: '#app',
             vuetify: new Vuetify(),
             data: {
-                isRecording: false,
-                status: '',
+                socket:null,
+                transcript: null,
+                isTranscribing: false,
+                transcription: null,
                 mediaRecorder: null,
                 audioChunks: [],
                 messages: [],
                 audioPlayer: new Audio(),
-                isPlayingAudio: false
+                isPlayingAudio: false,
+                timeout: null,
+                wait: 1
+            },
+            beforeUnmount() {
+                if (this.socket) {
+                    this.socket.disconnect();
+                }
             },
             methods: {
-                async startRecording() {
-                    try {
-                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        this.mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-                        this.mediaRecorder.ondataavailable = event => {
-                            this.audioChunks.push(event.data);
-                        };
-                        this.mediaRecorder.onstop = this.handleStop;
-                        this.mediaRecorder.start();
-                        this.isRecording = true;
-                        this.status = 'Recording...';
-                    } catch (error) {
-                        console.error('Error accessing media devices.', error);
+                async runCompletion(userText) {
+                    if (!userText) return;
+                    this.messages = [...this.messages, {role: "user", content: userText}];
+                    // Make POST request to backend
+                    const response = await fetch('/chat_completion', {
+                        method: 'POST',
+                        headers: {
+                        'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ messages: this.messages }),
+                    });
+                    const reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
+                    if (!reader) return;
+                    const assistantMessage = {role: "assistant", content: ""}
+                    this.messages = [...this.messages, assistantMessage];
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        let dataDone = false;
+                        const arr = value.split('\n');
+                        arr.forEach((data) => {
+                            if (data.length === 0) return; // ignore empty message
+                            if (data.startsWith(':')) return; // ignore sse comment message
+                            if (data === 'data: [DONE]') {
+                                dataDone = true;
+                                return;
+                            }
+                            const json = JSON.parse(data.substring(6));
+                            const content = json?.choices?.[0]?.delta?.content;
+                            if (content) assistantMessage.content += content;
+                        });
+                        if (dataDone) break;
+                    }
+                    if (assistantMessage.content.length ===0) {
+                        this.messages = this.messages.filter(i => i !== assistantMessage);
+                    } else {
+                        this.generateAudio(assistantMessage.content);
                     }
                 },
-                stopRecording() {
-                    this.mediaRecorder.stop();
-                    this.isRecording = false;
+                connectToSocketIo() {
+                    if (!this.socket) {
+                      this.socket = io();
+              
+                      this.socket.on('transcription', (transcription) => {
+                        if (this.timeout) clearTimeout(this.timeout);
+                        this.transcript = transcription;
+                        this.timeout = setTimeout(
+                            () => this.runCompletion(transcription), 
+                            this.wait * 1000
+                        );
+                      });
+              
+                      this.socket.on('transcriptionError', (error) => {
+                        console.error('Transcription Error:', error);
+                      });
+                    }
+                },
+                stopTranscription() {
+                    if (this.mediaRecorder) {
+                        this.mediaRecorder.stop();
+                    }
+                },
+                async startTranscription() {
+                    this.connectToSocketIo();
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        const recorderOptions = { mimeType: 'audio/webm' };
+                        this.mediaRecorder = new MediaRecorder(stream , recorderOptions);
+                        this.mediaRecorder.addEventListener('dataavailable', (event) => {
+                            this.socket.emit('audioData', event.data);
+                        });
+                
+                        this.mediaRecorder.start(100); // Emit audio data every 100ms
+                        this.mediaRecorder.onstop = () => this.isTranscribing = false;
+                        this.isTranscribing = true;
+                        this.transcript = '';
+                    } catch (error) {
+                        console.error('Error accessing microphone:', error);
+                    }
                 },
                 async handleStop() {
                     const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
@@ -69,18 +140,6 @@
                     ];
                     await this.generateAudio(data.completion);
                     this.status = 'Upload complete!';
-                },
-                async uploadAudio(audioBlob) {
-                    const formData = new FormData();
-                    formData.append('audio', audioBlob, 'recording.webm');
-                    formData.append('json', JSON.stringify({messages: this.messages}));
-                    const response = await fetch('/upload', {
-                        method: 'POST',
-                        body: formData,
-                    });
-                    const result = await response.json();
-                    console.log(result);
-                    return result;
                 },
                 generateAudio(text) {
                   return new Promise((resolve, reject) => {

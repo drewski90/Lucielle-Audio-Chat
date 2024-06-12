@@ -1,0 +1,17 @@
+{
+  "id": "com.rec.app",
+  "version": "1.0.0",
+  "vendor": "My Company",
+  "type": "web",
+  "main": "index.html",
+  "title": "rec app",
+  "icon": "icon.png",
+  "resolution": "1280x720",
+  "allowAudioCapture": true,
+  "allowVideoCapture": true,
+  "requiredPermissions": [
+      "time",
+      "settings.read",
+      "activities.manage"
+  ]
+}
