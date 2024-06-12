@@ -66,7 +66,7 @@ app.post('/chat_completion', async (req, res) => {
         'Authorization': `Bearer ${OPENAI_API_KEY}`
     };
     const data = {
-        model: 'gpt-4-turbo',
+        model: 'gpt-4o',
         messages: jsonData.messages,
         max_tokens: 100,
         stream: true
