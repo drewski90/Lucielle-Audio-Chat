@@ -33,7 +33,6 @@
                 socket:null,
                 transcript: null,
                 isTranscribing: false,
-                transcription: null,
                 mediaRecorder: null,
                 audioChunks: [],
                 messages: [],
@@ -127,19 +126,6 @@
                     } catch (error) {
                         console.error('Error accessing microphone:', error);
                     }
-                },
-                async handleStop() {
-                    const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
-                    this.audioChunks = [];
-                    this.status = 'Uploading...';
-                    const data = await this.uploadAudio(audioBlob);
-                    this.messages = [
-                      ...this.messages,
-                      {'role': 'user', 'content': data.transcription},
-                      {'role': 'assistant', 'content': data.completion}
-                    ];
-                    await this.generateAudio(data.completion);
-                    this.status = 'Upload complete!';
                 },
                 generateAudio(text) {
                   return new Promise((resolve, reject) => {
